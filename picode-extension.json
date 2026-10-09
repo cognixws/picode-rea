@@ -1,17 +1,135 @@
 {
   "id": "rea",
   "name": "REA",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "apiVersion": 1,
   "publisher": "COGNIX[SE]",
-  "description": "Let your agents reverse engineer a shipped app or file with REA (morluto/rea, MIT, pinned 6.1.0): Electron/ASAR and JavaScript apps (routes, IPC), APKs, .NET assemblies, native binaries with Ghidra, archives and HAR captures. Static tools only: nothing runs the analysed target. REA is not a sandbox: its engines parse the file as you, so analyse only files you trust. Analysis results go to your agent's model provider.",
+  "description": "Reverse engineer shipped apps with REA 6.1.0 (morluto/rea, MIT): Electron routes and IPC, APKs, .NET, native binaries. Static tools only; nothing runs the target. REA is not a sandbox: analyse only files you trust. Analysis results go to your agent's model provider.",
   "agent": {
     "mcpServers": {
       "rea": {
         "command": "node",
-        "args": ["${extensionDir}/server/rea-mcp.mjs"]
+        "args": [
+          "${extensionDir}/server/rea-mcp.mjs"
+        ]
       }
     },
-    "skills": ["skills/rea"]
+    "skills": [
+      "skills/rea"
+    ]
+  },
+  "icon": "ui/icon.svg",
+  "process": {
+    "command": "node",
+    "args": [
+      "${extensionDir}/server/process.mjs"
+    ]
+  },
+  "activation": {
+    "instance": true
+  },
+  "settings": [
+    {
+      "key": "tool_set",
+      "label": "Tools your agents get",
+      "type": "select",
+      "description": "Core: the 27 most used tools (about 13k tokens). Full: all 108 static tools (about 104k tokens), which crowds a smaller model's context.",
+      "options": [
+        "core",
+        "static"
+      ],
+      "default": "core"
+    },
+    {
+      "key": "provider",
+      "label": "Disassembler",
+      "type": "select",
+      "description": "Which engine opens native programs. Automatic picks the one that is set up.",
+      "options": [
+        "auto",
+        "ghidra",
+        "hopper",
+        "ida"
+      ],
+      "default": "auto"
+    },
+    {
+      "key": "ghidra_install_dir",
+      "label": "Ghidra folder",
+      "type": "text",
+      "description": "Absolute path of an extracted Ghidra 12.1.x release (for native programs)."
+    },
+    {
+      "key": "java_home",
+      "label": "Java (JDK) folder",
+      "type": "text",
+      "description": "Absolute path of a JDK 21 or newer. Leave empty when java is on the PATH."
+    },
+    {
+      "key": "ghidra_startup_timeout_ms",
+      "label": "Ghidra start timeout (ms)",
+      "type": "number",
+      "description": "Raise it for very large programs."
+    },
+    {
+      "key": "jadx_mcp_jar",
+      "label": "JADX MCP JAR",
+      "type": "text",
+      "description": "Absolute path of a jadx-headless-mcp 0.7.1 JAR (for Android apps)."
+    },
+    {
+      "key": "wakaru_command",
+      "label": "Wakaru command",
+      "type": "text",
+      "description": "Absolute path of Wakaru 1.13.0 (readable code from a bundle)."
+    },
+    {
+      "key": "pwntools_python",
+      "label": "Python with pwntools",
+      "type": "text",
+      "description": "Absolute path of a Python that has pwntools 4.15.0 (ELF layout and crash dumps)."
+    },
+    {
+      "key": "binwalk_command",
+      "label": "Binwalk command",
+      "type": "text",
+      "description": "Absolute path of Binwalk 3.1.x (firmware)."
+    },
+    {
+      "key": "unblob_command",
+      "label": "Unblob command",
+      "type": "text",
+      "description": "Absolute path of Unblob 26.6.x (firmware), as an alternative to Binwalk."
+    },
+    {
+      "key": "ida_mcp_config",
+      "label": "IDA MCP registration",
+      "type": "text",
+      "description": "Only with your own IDA Pro license: path of your IDA MCP registration JSON."
+    },
+    {
+      "key": "hopper_launcher",
+      "label": "Hopper launcher",
+      "type": "text",
+      "description": "Only with your own Hopper license: path of its launcher."
+    }
+  ],
+  "ui": {
+    "pages": [
+      {
+        "id": "check",
+        "title": "REA",
+        "path": "ui/index.html"
+      }
+    ]
+  },
+  "contributes": {
+    "commands": [
+      {
+        "id": "open-check",
+        "title": "Check REA tools",
+        "page": "check"
+      }
+    ]
   }
 }
