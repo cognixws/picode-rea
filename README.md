@@ -3,13 +3,16 @@
 A PiCode extension that gives your agents **REA**
 ([morluto/rea](https://github.com/morluto/rea), MIT): reverse engineering of a
 shipped app or file, from Electron routes and IPC down to native functions.
-The extension wraps REA as it is. It does not fork or reimplement it: the npm
-package `rea-agents` is pinned at **6.1.0** and vendored under
-`vendor/node_modules`, so the code an agent runs is the code the owner
-reviewed, bound to the extension's digest.
+The extension wraps **`rea-agents@6.1.0` unchanged** (MIT, © morluto). It does
+not fork, patch or reimplement it: the npm package is pinned at 6.1.0 and
+vendored under `vendor/node_modules`, so the code an agent runs is the code
+the owner reviewed, bound to the extension's digest. REA's license stays at
+`vendor/node_modules/rea-agents/LICENSE`.
 
-**Static tools only.** Nothing this extension exposes runs or attaches to the
-analysed target. **REA is not a sandbox** (its own SECURITY.md says so): its
+**Static tools only.** Tools that execute or attach to the analysed target
+(process, Electron, browser and native UI scenarios, LLDB call observation,
+live page instrumentation) are withheld: they are never listed, and a call
+to one is refused before it reaches REA. **REA is not a sandbox** (its own SECURITY.md says so): its
 engines (Ghidra, JADX, …) parse the file with your user's permissions, so
 analyse only files you trust. **Analysis results go to your agent's model
 provider.**
