@@ -1,7 +1,9 @@
 // Smoke test of server/rea-mcp.mjs against the vendored REA, over stdio.
 // Usage: node test/proxy-smoke.mjs [static-target.asar]
-// Checks: the core list is the allowlist's core set; a withheld tool is
-// refused by the proxy; with a target, analyze_javascript_application runs.
+// Checks: the handshake answers before REA has started; the core list is the
+// allowlist's core set; tools/catalog.json matches the live REA server; a
+// withheld tool is refused by the proxy; with a target,
+// analyze_javascript_application runs through to REA.
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -10,6 +12,7 @@ import assert from "node:assert/strict";
 
 const pkg = dirname(dirname(fileURLToPath(import.meta.url)));
 const allow = JSON.parse(readFileSync(join(pkg, "tools/allowlist.json"), "utf8"));
+const catalog = JSON.parse(readFileSync(join(pkg, "tools/catalog.json"), "utf8"));
 const p = spawn(process.execPath, [join(pkg, "server/rea-mcp.mjs")], { stdio: ["pipe", "pipe", "inherit"] });
 let buf = "";
 const pending = new Map();
@@ -32,12 +35,21 @@ const rpc = (method, params) =>
   });
 const timer = setTimeout(() => (console.error("timeout"), process.exit(2)), 120000);
 
+const t0 = Date.now();
 await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "picode-rea-smoke", version: "0" } });
 p.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+console.log(`ok   initialize after ${Date.now() - t0} ms`);
 const list = await rpc("tools/list", {});
+console.log(`ok   tools/list after ${Date.now() - t0} ms`);
 const names = list.result.tools.map((t) => t.name).sort();
 assert.deepEqual(names, [...allow.core].sort());
 console.log(`ok   tools/list: ${names.length} core tools`);
+assert.ok(Date.now() - t0 < 500, "the handshake waited for REA");
+
+// The catalog the proxy answers from must be what this REA serves.
+const live = await liveStaticTools();
+assert.deepEqual(live, catalog.tools, "tools/catalog.json is stale: run scripts/catalog.mjs");
+console.log(`ok   tools/catalog.json matches the live REA (${live.length} static tools)`);
 
 const refused = await rpc("tools/call", { name: "capture_process_scenario", arguments: {} });
 assert.equal(refused.result.isError, true);
@@ -55,3 +67,28 @@ if (target) {
 clearTimeout(timer);
 p.kill();
 process.exit(0);
+
+function liveStaticTools() {
+  return new Promise((resolve, reject) => {
+    const r = spawn(process.execPath, [join(pkg, "vendor/node_modules/rea-agents/scripts/rea.mjs"), "mcp"], { stdio: ["pipe", "pipe", "ignore"] });
+    let b = "";
+    r.stdout.setEncoding("utf8");
+    r.stdout.on("data", (d) => {
+      b += d;
+      let i;
+      while ((i = b.indexOf("\n")) >= 0) {
+        const m = JSON.parse(b.slice(0, i));
+        b = b.slice(i + 1);
+        if (m.id === 1) {
+          r.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+          r.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\n");
+        } else if (m.id === 2) {
+          r.kill();
+          resolve(m.result.tools.filter((t) => allow.static.includes(t.name)));
+        }
+      }
+    });
+    r.on("error", reject);
+    r.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "drift", version: "0" } } }) + "\n");
+  });
+}

@@ -1,13 +1,17 @@
 #!/usr/bin/env node
-// picode-rea MCP proxy: starts the vendored REA MCP server unchanged and
-// stands between it and the agent's CLI on stdio. It does two things only:
+// picode-rea MCP proxy: runs the vendored REA MCP server unchanged and stands
+// between it and the agent's CLI on stdio.
 //
-//   1. tools/list answers carry only the tools of the selected profile
-//      (tools/allowlist.json: "core" by default, "static" on request);
-//   2. a tools/call for any other tool is answered here, never forwarded.
+//   1. The handshake and tools/list are answered at once from
+//      tools/catalog.json (recorded from this same pinned REA by
+//      scripts/catalog.mjs). REA takes 1–1.5 s to start, and Codex and
+//      Claude Code build an agent's first turn without a server still pending.
+//   2. tools/list carries only the selected set (tools/allowlist.json:
+//      "core" by default, "static" on request).
+//   3. A tools/call for any other tool is answered here and never reaches
+//      REA. Allowed calls wait until REA is ready, then pass through.
 //
-// Everything else (initialize, notifications, server requests, results)
-// passes through byte for byte. REA itself is not modified.
+// Every other message passes through unchanged. REA itself is not modified.
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -15,11 +19,16 @@ import { fileURLToPath } from "node:url";
 
 const pkg = dirname(dirname(fileURLToPath(import.meta.url)));
 const reaEntry = join(pkg, "vendor/node_modules/rea-agents/scripts/rea.mjs");
-const allowlist = JSON.parse(readFileSync(join(pkg, "tools/allowlist.json"), "utf8"));
+const allowlist = readJSON("tools/allowlist.json");
+const catalog = readJSON("tools/catalog.json");
 const local = readLocalSettings();
-const profile = process.env.PICODE_REA_PROFILE || local.profile || "core";
-const allowed = new Set(profile === "static" ? allowlist.static : allowlist.core);
-if (!allowlist[profile]) log(`unknown profile ${JSON.stringify(profile)}; using core`);
+let profile = process.env.PICODE_REA_PROFILE || local.profile || "core";
+if (profile !== "core" && profile !== "static") {
+  log(`unknown profile ${JSON.stringify(profile)}; using core`);
+  profile = "core";
+}
+const allowed = new Set(allowlist[profile]);
+const listed = catalog.tools.filter((t) => allowed.has(t.name));
 
 const child = spawn(process.execPath, [reaEntry, "mcp"], {
   stdio: ["pipe", "pipe", "inherit"],
@@ -31,42 +40,53 @@ child.on("error", (err) => {
   process.exit(1);
 });
 
-const listIds = new Set();
+// Until REA has answered our own initialize, what the client sends waits here.
+const INIT_ID = "picode-rea-init";
+let ready = false;
+const queue = [];
 
 lines(process.stdin, (line) => {
   const msg = parse(line);
-  if (msg === undefined) return child.stdin.write(line + "\n");
-  const out = [];
-  for (const m of Array.isArray(msg) ? msg : [msg]) {
-    if (m?.method === "tools/list" && m.id != null) listIds.add(key(m.id));
-    if (m?.method === "tools/call" && m.id != null && !allowed.has(m.params?.name)) {
-      reply(m.id, refusal(m.params?.name));
-      continue;
-    }
-    out.push(m);
+  if (msg === undefined || Array.isArray(msg)) return toREA(line);
+  if (msg.method === "initialize" && msg.id != null) {
+    const asked = msg.params?.protocolVersion;
+    const protocolVersion = catalog.protocolVersions[asked] ?? catalog.fallbackVersion;
+    reply(msg.id, { ...catalog.initialize, protocolVersion });
+    child.stdin.write(JSON.stringify({ ...msg, id: INIT_ID }) + "\n");
+    return;
   }
-  if (out.length === 0) return;
-  child.stdin.write(JSON.stringify(Array.isArray(msg) ? out : out[0]) + "\n");
+  if (msg.method === "tools/list" && msg.id != null) return reply(msg.id, { tools: listed });
+  if (msg.method === "tools/call" && msg.id != null && !allowed.has(msg.params?.name)) {
+    return reply(msg.id, refusal(msg.params?.name));
+  }
+  toREA(line);
 });
-process.stdin.on("end", () => child.stdin.end());
+process.stdin.on("end", () => (ready ? child.stdin.end() : queue.push(null)));
 
 lines(child.stdout, (line) => {
   const msg = parse(line);
-  if (msg === undefined) return process.stdout.write(line + "\n");
-  let changed = false;
-  for (const m of Array.isArray(msg) ? msg : [msg]) {
-    if (m?.id != null && listIds.delete(key(m.id)) && Array.isArray(m.result?.tools)) {
-      m.result.tools = m.result.tools.filter((t) => allowed.has(t.name));
-      changed = true;
-    }
+  if (msg?.id === INIT_ID) {
+    if (msg.error) log(`REA refused initialize: ${JSON.stringify(msg.error)}`);
+    ready = true;
+    for (const q of queue.splice(0)) q === null ? child.stdin.end() : child.stdin.write(q + "\n");
+    return;
   }
-  process.stdout.write((changed ? JSON.stringify(msg) : line) + "\n");
+  // REA announcing a changed list would bypass the catalog: drop it, the
+  // catalog is the pinned version's list.
+  if (msg?.method === "notifications/tools/list_changed") return;
+  process.stdout.write(line + "\n");
 });
 
+function toREA(line) {
+  if (ready) child.stdin.write(line + "\n");
+  else queue.push(line);
+}
+
 function refusal(name) {
-  const why = Object.values(allowlist.withheld).some((group) =>
+  const withheld = Object.values(allowlist.withheld).some((group) =>
     Array.isArray(group) ? group.includes(name) : name in group,
-  )
+  );
+  const why = withheld
     ? "PiCode withholds it: it runs or attaches to the analysed target, which this extension does not allow."
     : `It is not in the "${profile}" tool set PiCode gave this agent.`;
   return {
@@ -77,6 +97,10 @@ function refusal(name) {
 
 function reply(id, result) {
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
+}
+
+function readJSON(rel) {
+  return JSON.parse(readFileSync(join(pkg, rel), "utf8"));
 }
 
 // Settings the extension's process wrote from PiCode's Settings form:
@@ -110,10 +134,6 @@ function parse(line) {
   } catch {
     return undefined;
   }
-}
-
-function key(id) {
-  return typeof id + ":" + String(id);
 }
 
 function log(text) {

@@ -16,7 +16,7 @@ provider.**
 
 | Part | What it does |
 |---|---|
-| MCP server `rea` (Claude Code, Codex, OpenCode) | `server/rea-mcp.mjs` starts REA's own MCP server and filters it: only the tools of the selected set are listed, any other call is refused before it reaches REA |
+| MCP server `rea` (Claude Code, Codex, OpenCode) | `server/rea-mcp.mjs` starts REA's own MCP server and filters it: only the tools of the selected set are listed, any other call is refused before it reaches REA. The handshake and the list are answered from `tools/catalog.json` in about 30 ms, so an agent's first turn already has the tools |
 | Skill `rea` (Pi, Omp, Claude Code) | How to route a target to the first tool, how to read large Evidence, where to export it, and what is withheld |
 
 ## The tool sets
@@ -66,6 +66,14 @@ the vendored copy. Nothing touched the owner's CLI configs.
 
 What follows from it:
 
+- **REA starts in 1.0–1.5 s; the first turn would miss it.** On the first
+  scratch run, Codex logged `omitting pending optional MCP server
+  server_name=rea` and Claude Code answered "still connecting" to a prompt
+  given at launch. The proxy now answers `initialize` and `tools/list` from
+  `tools/catalog.json`, recorded from this pinned REA by
+  `scripts/catalog.mjs`. Calls wait until REA is up. The smoke test fails if
+  the catalog and the live server disagree.
+
 - **Answers are large.** Agents must read `summary` first. The skill says so.
   Claude Code caps an MCP answer; REA's `REA_MCP_MAX_RESPONSE_BYTES` and
   `export_evidence_bundle` are its own way out.
@@ -78,13 +86,15 @@ What follows from it:
 
 ```bash
 scripts/vendor.sh            # npm ci from vendor/package-lock.json, then prune
+node scripts/catalog.mjs     # record REA's handshake and static tool list
 node test/proxy-smoke.mjs /path/to/sample.asar
 ```
 
 To move to a new REA version, change `vendor/package.json`, run
 `npm install --package-lock-only --ignore-scripts` in `vendor/`, then
-`scripts/vendor.sh`. Diff `tools/list` against `tools/allowlist.json`: a new
-tool is withheld until it is classified.
+`scripts/vendor.sh` and `scripts/catalog.mjs`. The catalog script names any
+tool `tools/allowlist.json` does not classify; such a tool is withheld until
+it is.
 
 ## License
 
