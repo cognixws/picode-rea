@@ -18,5 +18,8 @@ find node_modules -type l -delete
 find node_modules -type f \( -name '*.map' -o -name '*.d.ts' -o -name '*.d.mts' \
   -o -name '*.d.cts' -o -name '*.md' -o -name '*.markdown' \) \
   ! -iname 'LICENSE*' ! -path 'node_modules/rea-agents/*' -delete
+# Editor and agent settings some packages publish by mistake (thread-stream
+# ships a .claude folder); git ignores them, so a clone would differ.
+find node_modules -type d \( -name .claude -o -name .vscode -o -name .idea \) -prune -exec rm -rf {} +
 find node_modules -type d -empty -delete
 printf 'bytes %s\nfiles %s\n' "$(du -sb node_modules | cut -f1)" "$(find node_modules -type f | wc -l)"
