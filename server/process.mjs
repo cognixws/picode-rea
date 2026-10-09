@@ -8,11 +8,13 @@ import http from "node:http";
 import https from "node:https";
 import { spawn } from "node:child_process";
 import { timingSafeEqual } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FAMILIES, statusOf } from "./families.mjs";
 import { plainRemediation, reaEnv } from "./settings.mjs";
+import { evidenceDirs, listBundles, outputFor, planFor, readBundle, resolveBundle, targetPath } from "./evidence.mjs";
+import { withREA } from "./mcp-client.mjs";
 
 const env = process.env;
 const pkg = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -157,6 +159,83 @@ function check() {
   return running;
 }
 
+// ---- evidence ----
+
+async function workspaces() {
+  const r = await hostRequest("GET", "/api/ext/v1/workspaces");
+  return r.workspaces || [];
+}
+
+async function dirs() {
+  return evidenceDirs(await workspaces(), dataDir);
+}
+
+// One analysis at a time per file; the page polls /evidence for the result.
+const analyses = new Map(); // target path → { state, error, id, startedAt }
+
+async function analyze({ path, workspaceId }) {
+  // Open with names the file and, when it knows it, the workspace; else the
+  // workspace is the one whose folder holds the file.
+  const on = (await workspaces()).filter((w) => w.extensionOn);
+  const ws = on.find((w) => w.id === workspaceId) || (!workspaceId && on.find((w) => w.path && targetPath(path, w)));
+  if (!ws) throw Object.assign(new Error("Turn REA on in this file's workspace first."), { status: 409 });
+  const target = targetPath(path, ws);
+  if (!target) throw Object.assign(new Error("That file is outside the workspace folder."), { status: 400 });
+  const plan = planFor(target);
+  if (!plan) throw Object.assign(new Error("REA has no static analysis for this kind of file here. Ask an agent with REA instead."), { status: 400 });
+  const running = analyses.get(target);
+  if (running?.state === "running") return { target, ...running };
+  // A reopened page replays its Open with context: reuse the newest result
+  // made after the file last changed instead of analysing again.
+  const fresh = latestFor(ws.id, target);
+  if (fresh) {
+    const done = { state: "done", id: Buffer.from(fresh).toString("base64url"), workspaceId: ws.id, reused: true };
+    analyses.set(target, done);
+    return { target, ...done };
+  }
+  const job = { state: "running", startedAt: new Date().toISOString(), workspaceId };
+  analyses.set(target, job);
+  const out = outputFor(dataDir, ws.id, target);
+  withREA({ entry: reaEntry, env: reaEnvironment(), cwd: dataDir }, async ({ call }) => {
+    for (const [tool, args] of plan) await call(tool, args);
+    await call("export_evidence_bundle", { path: out });
+  }).then(
+    () => { job.state = "done"; job.id = Buffer.from(out).toString("base64url"); },
+    (e) => { job.state = "failed"; job.error = e.message; log(`analysis of ${target} failed: ${e.message}`); },
+  );
+  return { target, ...job };
+}
+
+function latestFor(wsId, target) {
+  let changed;
+  try { changed = statSync(target).mtimeMs; } catch { return null; }
+  const dir = join(dataDir, "evidence", wsId);
+  const prefix = basename(target).replace(/[^\w.-]+/g, "_") + "-";
+  let best = null;
+  for (const name of (() => { try { return readdirSync(dir); } catch { return []; } })()) {
+    if (!name.startsWith(prefix) || !name.endsWith(".json") || name.endsWith(".agent.json")) continue;
+    const st = statSync(join(dir, name));
+    if (st.mtimeMs >= changed && (!best || st.mtimeMs > best.t)) best = { t: st.mtimeMs, path: join(dir, name) };
+  }
+  return best?.path ?? null;
+}
+
+async function sendToAgent({ id, agentId, publish }) {
+  const found = resolveBundle(id, await dirs());
+  if (!found) throw Object.assign(new Error("That evidence file is gone."), { status: 404 });
+  const b = readBundle(found.path);
+  const ops = [...new Set(b.records.map((r) => r.operation))].join(", ");
+  const target = b.records.find((r) => r.target.path)?.target.path || "";
+  const lines = [
+    `REA evidence from the REA page: ${found.path}`,
+    `${b.records.length} record(s) (${ops})${target ? ` on ${target}` : ""}.`,
+    "Load it with the rea tool import_evidence_bundle, or read the JSON. Keep observations, inferences and unknowns apart, and cite evidence IDs.",
+  ];
+  if (publish) lines.push("Then publish a short report of what it shows as an artifact, and reply with its id.");
+  await hostRequest("POST", "/api/ext/v1/messages", { to: agentId, text: lines.join("\n") });
+  return { sent: true };
+}
+
 // ---- the page's relay ----
 
 const equal = (a, b) => { const x = Buffer.from(a || ""), y = Buffer.from(b || ""); return x.length === y.length && timingSafeEqual(x, y); };
@@ -167,11 +246,43 @@ const server = http.createServer(async (req, res) => {
   try {
     if (url.pathname === "/check" && req.method === "GET") return send(200, last ?? { checking: true, ...(await check()) });
     if (url.pathname === "/check" && req.method === "POST") return send(200, await check());
+    if (url.pathname === "/evidence" && req.method === "GET") {
+      const ws = await workspaces();
+      const jobs = [...analyses.entries()].map(([target, j]) => ({ target, ...j }));
+      return send(200, { bundles: listBundles(evidenceDirs(ws, dataDir)), workspaces: ws.filter((w) => w.extensionOn).map((w) => ({ id: w.id, name: w.name })), analyses: jobs });
+    }
+    if (url.pathname === "/evidence/view" && req.method === "GET") {
+      const found = resolveBundle(url.searchParams.get("id"), await dirs());
+      if (!found) return send(404, { error: "That evidence file is gone." });
+      return send(200, { ...readBundle(found.path), workspaceId: found.ws.id, workspaceName: found.ws.name, source: found.source });
+    }
+    if (url.pathname === "/agents" && req.method === "GET") {
+      const r = await hostRequest("GET", "/api/ext/v1/agents?workspace=" + encodeURIComponent(url.searchParams.get("workspace") || ""));
+      return send(200, { agents: r.agents || [] });
+    }
+    if (url.pathname === "/analyze" && req.method === "POST") return send(202, await analyze(await body(req)));
+    if (url.pathname === "/send" && req.method === "POST") return send(200, await sendToAgent(await body(req)));
     send(404, { error: "Unknown request." });
   } catch (e) {
-    send(500, { error: e.message });
+    send(e.status || 500, { error: e.message });
   }
 });
+
+function body(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on("data", (b) => {
+      size += b.length;
+      if (size > 64 << 10) return reject(Object.assign(new Error("Request too large."), { status: 413 }));
+      chunks.push(b);
+    });
+    req.on("end", () => {
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString() || "{}")); } catch { reject(Object.assign(new Error("Unreadable request."), { status: 400 })); }
+    });
+    req.on("error", reject);
+  });
+}
 
 try {
   await loadSettings();

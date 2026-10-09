@@ -12,12 +12,22 @@ attaches to the analysed target.
 
 ## Where the tools are
 
-- Claude Code, Codex, OpenCode: the MCP server `rea` (tool names such as
-  `analyze_javascript_application`, `open_binary`, `inspect_android_package`).
-- Pi, Omp, Grok, Hermes, Muse, Antigravity: the `rea` capability tools that
-  PiCode lists for this launch, when the owner turned them on for you.
+PiCode gives an agent REA one of two ways; the owner picks per agent.
 
-If none are there, the owner has not given them to this agent. Say so and
+- **The `rea` MCP server** (Claude Code, Codex, OpenCode): REA's own tools,
+  such as `analyze_javascript_application`, `open_binary`,
+  `inspect_android_package`. The table below uses these names.
+- **The REA static analysis group** (all nine CLIs): seven tools that each
+  run a whole workflow and save REA's full Evidence for you: `analyze-app`,
+  `trace-feature`, `inspect-package`, `inspect-dotnet`, `inspect-android`,
+  `inspect-capture` and `read-evidence`. Pi and Omp see them as native
+  tools; Grok, Hermes, Muse and Antigravity call
+  `picode extension call rea static <tool> --input -` with the JSON
+  arguments on stdin (`picode extension tools` lists them). Each answer is a
+  short digest plus the bundle's path; `read-evidence` with a `kind` pages
+  through the rest.
+
+If neither is there, the owner has not given REA to this agent. Say so and
 stop. **Never** run `rea setup`, `npx rea-agents…` or edit a CLI's MCP config
 yourself: PiCode installs a pinned, reviewed REA and wires it per agent.
 
@@ -47,9 +57,10 @@ with what works.
 - Separate observations, inferences and unknowns in your answer and cite
   Evidence IDs. Static analysis never observed the app running: do not say
   it did.
-- To keep the evidence for the owner, call `export_evidence_bundle` with an
-  absolute path `<workspace folder>/.rea/evidence/<short-name>.json`. The
-  REA page in PiCode lists that folder for every workspace.
+- With the MCP server, keep the evidence for the owner: call
+  `export_evidence_bundle` with an absolute path
+  `<workspace folder>/.rea/evidence/<short-name>.json`. The group's tools
+  save it themselves. The REA page in PiCode lists both.
 
 ## What is not available, on purpose
 

@@ -1,8 +1,8 @@
 {
   "id": "rea",
   "name": "REA",
-  "version": "0.2.0",
-  "apiVersion": 1,
+  "version": "0.4.0",
+  "apiVersion": 2,
   "publisher": "COGNIX[SE]",
   "description": "Reverse engineer shipped apps with REA 6.1.0 (morluto/rea, MIT): Electron routes and IPC, APKs, .NET, native binaries. Static tools only; nothing runs the target. REA is not a sandbox: analyse only files you trust. Analysis results go to your agent's model provider.",
   "agent": {
@@ -16,6 +16,207 @@
     },
     "skills": [
       "skills/rea"
+    ],
+    "executor": {
+      "protocol": "picode-tools/1",
+      "command": "node",
+      "args": [
+        "${extensionDir}/server/execute.mjs"
+      ]
+    },
+    "capabilities": [
+      {
+        "id": "static",
+        "label": "REA static analysis",
+        "description": "Reverse engineer a shipped app or file without running it: Electron/JavaScript apps (routes, IPC, preload bridges), packages, .NET assemblies, APKs and network captures. Each call saves REA's full Evidence and answers a short digest.",
+        "tools": [
+          {
+            "id": "analyze-app",
+            "description": "Map a shipped Electron or JavaScript app (an .asar file or an extracted app folder) without running it: windows, preload bridges, IPC channels and handlers, modules. Answers a digest (up to 15 items per kind, with file:line) and the path of the full Evidence bundle; page through a kind with read-evidence.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "description": "The file: absolute, or relative to your working folder."
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "id": "trace-feature",
+            "description": "Trace one feature through a shipped JavaScript/Electron app: start from an IPC channel, route, API, module or literal string and follow every static relation to it. Answers what it touches (with file:line) and saves the full Evidence.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "description": "The file: absolute, or relative to your working folder."
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "channel",
+                    "route",
+                    "api",
+                    "module",
+                    "string"
+                  ],
+                  "description": "What the value is."
+                },
+                "value": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 400,
+                  "description": "The channel name, route, API, module or text to start from."
+                },
+                "match": {
+                  "type": "string",
+                  "enum": [
+                    "exact",
+                    "contains"
+                  ],
+                  "description": "How to match the value (default contains)."
+                }
+              },
+              "required": [
+                "path",
+                "kind",
+                "value"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "id": "inspect-package",
+            "description": "List every file inside an archive or app package (ZIP, APK, IPA, MSIX, ASAR) with digests and integrity checks, without extracting or running it.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "description": "The file: absolute, or relative to your working folder."
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "id": "inspect-dotnet",
+            "description": "Inspect a .NET assembly (DLL or EXE): types, members and native boundaries, without running it.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "description": "The file: absolute, or relative to your working folder."
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "id": "inspect-android",
+            "description": "Inspect an Android APK: manifest, permissions, components and classes. Needs JADX set up in REA's settings; the answer says so when it is not.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "description": "The file: absolute, or relative to your working folder."
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "id": "inspect-capture",
+            "description": "Read a saved network capture (HAR or mitmproxy): requests and responses, with known credentials left out. Recorded URLs are never fetched.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "description": "The file: absolute, or relative to your working folder."
+                },
+                "format": {
+                  "type": "string",
+                  "enum": [
+                    "har",
+                    "mitmproxy"
+                  ],
+                  "description": "The capture's format (default har)."
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "id": "read-evidence",
+            "description": "Read a saved REA Evidence bundle again: without kind, its digest; with kind (for example ipc-channel or javascript-module), every item of that kind, 100 at a time from offset.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "bundle": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "description": "The bundle path an earlier answer gave."
+                },
+                "kind": {
+                  "type": "string",
+                  "maxLength": 80,
+                  "description": "A kind from the digest's groups."
+                },
+                "record": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000,
+                  "description": "Which record in the bundle (default 0)."
+                },
+                "offset": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000000,
+                  "description": "Where to start (default 0)."
+                }
+              },
+              "required": [
+                "bundle"
+              ],
+              "additionalProperties": false
+            }
+          }
+        ]
+      }
     ]
   },
   "icon": "ui/icon.svg",
@@ -126,10 +327,42 @@
   "contributes": {
     "commands": [
       {
-        "id": "open-check",
-        "title": "Check REA tools",
+        "id": "open-rea",
+        "title": "Open REA",
         "page": "check"
       }
+    ],
+    "openWith": [
+      {
+        "pattern": "*.asar",
+        "page": "check",
+        "title": "Analyse with REA"
+      },
+      {
+        "pattern": "*.apk",
+        "page": "check",
+        "title": "Analyse with REA"
+      },
+      {
+        "pattern": "*.exe",
+        "page": "check",
+        "title": "Analyse with REA"
+      },
+      {
+        "pattern": "*.dll",
+        "page": "check",
+        "title": "Analyse with REA"
+      },
+      {
+        "pattern": "*.har",
+        "page": "check",
+        "title": "Analyse with REA"
+      }
     ]
-  }
+  },
+  "permissions": [
+    "workspaces:read",
+    "agents:read",
+    "messages:send"
+  ]
 }

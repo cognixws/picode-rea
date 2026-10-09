@@ -17,7 +17,17 @@ provider.**
 | Part | What it does |
 |---|---|
 | MCP server `rea` (Claude Code, Codex, OpenCode) | `server/rea-mcp.mjs` starts REA's own MCP server and filters it: only the tools of the selected set are listed, any other call is refused before it reaches REA. The handshake and the list are answered from `tools/catalog.json` in about 30 ms, so an agent's first turn already has the tools |
-| Skill `rea` (Pi, Omp, Claude Code) | How to route a target to the first tool, how to read large Evidence, where to export it, and what is withheld |
+| Capability group `static` (all nine CLIs) | `server/execute.mjs` (picode-tools/1): `analyze-app`, `trace-feature`, `inspect-package`, `inspect-dotnet`, `inspect-android`, `inspect-capture`, `read-evidence`. Each call runs one whole REA workflow in a fresh session (PiCode allows 60 s and 4 MiB per call), saves REA's full Evidence bundle and answers a digest of a few KB |
+| Skill `rea` (Pi, Omp, Claude Code) | Which tools exist and how to route a target to the first one, how to read large Evidence, where it is saved, and what is withheld. REA's own skill is not shipped: it tells agents to run `npx rea-agents@latest setup --yes` |
+| Page **REA** (Apps tile, tab, phone More → Apps) | **Evidence**: bundles agents saved and the page's own analyses, each opened as groups (IPC channels, windows, modules… with file:line), summary, limitations and evidence IDs, plus **Send to agent** and **Open as artifact**. **What works here**: REA's own `doctor` and `binary_session` answers as Ready / Needs setup / Your license / Needs a Mac, one action per row |
+| Open with ▸ **Analyse with REA** (`.asar`, `.apk`, `.exe`, `.dll`, `.har`) | A static analysis by the extension's process; the result opens on the page. A reopened page reuses the result while the file is unchanged |
+| Settings | Tool set (core or full), disassembler, Ghidra and JDK folders, JADX JAR, Wakaru, pwntools, Binwalk/Unblob, and IDA/Hopper paths for the owner's own licenses. The process writes them to `data/rea-env.json`; agents started afterwards use them |
+
+Permissions: `workspaces:read` (find each workspace's evidence folder),
+`agents:read` (the Send list) and `messages:send` (Send to agent).
+"Open as artifact" asks the chosen agent to publish a report: extensions
+have no door to create an artifact themselves (ADR-0236/0249 give them read
+and export only).
 
 ## The tool sets
 
@@ -100,3 +110,14 @@ it is.
 
 The extension is Apache-2.0. REA and every vendored package keep their own
 licenses, under `vendor/node_modules/*/LICENSE*`. REA's license is MIT.
+
+## Not done, and why
+
+| Item | Why |
+|---|---|
+| "Install" opening a terminal | Extension pages have no terminal door (ADR-0230). The page copies the command instead; only the JDK on Ubuntu has a certain one |
+| "Open as artifact" without an agent | No artifact-create door for extensions. The approved app-map work adds an extension-rendered artifact kind; a `rea-evidence` kind would replace the agent round trip |
+| A review tab for `compare_application_versions` | Waits for the review-tab door being added for the app map |
+| Native analysis in the capability group | Ghidra restarts per call and would not fit 60 s; native stays on the MCP server |
+| Runtime tools (process, Electron, browser, native UI) | Not approved (F6) |
+| Antigravity check | The scratch instance had no Antigravity sign-in; the other eight CLIs were checked live |
