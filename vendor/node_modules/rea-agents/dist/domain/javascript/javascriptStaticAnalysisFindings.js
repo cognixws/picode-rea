@@ -1,0 +1,82 @@
+/** Incremental point lookup preserving insertion-order precedence for overlaps. */
+export class JavaScriptModuleRangeIndex {
+    root = {};
+    end;
+    nextOrder = 0;
+    /** Create an empty offset index bounded by the analyzed source length. */
+    constructor(sourceLength) {
+        this.end = Math.max(1, sourceLength + 1);
+    }
+    /** Add a module range in the same discovery order used by the analysis pass. */
+    add(range) {
+        const indexed = { order: this.nextOrder, range };
+        this.nextOrder += 1;
+        const start = Math.max(0, range.start);
+        const end = Math.min(this.end, range.end + 1);
+        if (start < end)
+            this.insert(this.root, 0, this.end, start, end, indexed);
+    }
+    /** Return the first discovered inclusive range containing an offset. */
+    find(offset) {
+        if (offset === null ||
+            offset === undefined ||
+            !Number.isSafeInteger(offset) ||
+            offset < 0 ||
+            offset >= this.end)
+            return undefined;
+        let node = this.root;
+        let low = 0;
+        let high = this.end;
+        let best;
+        while (node !== undefined) {
+            if (node.best !== undefined &&
+                (best === undefined || node.best.order < best.order))
+                best = node.best;
+            if (high - low <= 1)
+                break;
+            const middle = low + Math.floor((high - low) / 2);
+            if (offset < middle) {
+                node = node.left;
+                high = middle;
+            }
+            else {
+                node = node.right;
+                low = middle;
+            }
+        }
+        return best?.range;
+    }
+    insert(node, low, high, queryLow, queryHigh, value) {
+        if (queryLow <= low && high <= queryHigh) {
+            if (node.best === undefined || value.order < node.best.order)
+                node.best = value;
+            return;
+        }
+        const middle = low + Math.floor((high - low) / 2);
+        if (queryLow < middle) {
+            node.left ??= {};
+            this.insert(node.left, low, middle, queryLow, queryHigh, value);
+        }
+        if (queryHigh > middle) {
+            node.right ??= {};
+            this.insert(node.right, middle, high, queryLow, queryHigh, value);
+        }
+    }
+}
+/** Add one module-attributable finding once per source location. */
+export const addLocatedFinding = (context, input) => addFindingOnce(context.accumulator, `${input.key}\0${String(input.node.start)}`, () => input.collection.push({
+    offset: input.node.start ?? -1,
+    value: input.value,
+}));
+/** Reserve one deterministic finding key before mutating an accumulator. */
+export const addFindingOnce = (accumulator, key, add) => {
+    if (accumulator.seen.has(key))
+        return;
+    accumulator.seen.add(key);
+    add();
+};
+/** Attach recovered bundle-module ownership to findings after traversal. */
+export const finalizeLocatedFindings = (values, modules) => values.map(({ offset, value }) => ({
+    ...value,
+    module_key: modules.find(offset)?.key ?? null,
+}));

@@ -1,0 +1,47 @@
+import { NATIVE_TOOL_CONTRACTS } from "../contracts/native/nativeToolContracts.js";
+/** Public identity committed by macOS-native inspection observations. */
+export const NATIVE_MACOS_PROVIDER_IDENTITY = Object.freeze({
+    id: "native-macos",
+    name: "macOS native inspection utilities",
+    version: null,
+});
+const IDENTITY = NATIVE_MACOS_PROVIDER_IDENTITY;
+/** Operations whose target process can show UI, use the network and write files. */
+const OWNED_PROCESS_OPERATIONS = new Set([
+    "capture_native_ui_scenario",
+    "observe_native_calls",
+]);
+/** Declare native host coverage without creating a command runner. */
+export const nativeMacOSCapabilities = (platform = process.platform) => {
+    const available = platform === "darwin";
+    return Object.freeze([
+        ...NATIVE_TOOL_CONTRACTS,
+        { name: "inspect_native_dispatch_metadata" },
+    ].map((contract) => {
+        const availability = available
+            ? { available: true, reason: null }
+            : {
+                available: false,
+                availabilityCode: "unsupported_host",
+                reason: "Native macOS utilities require macOS.",
+            };
+        return Object.freeze({
+            provider: IDENTITY,
+            operation: contract.name,
+            ...availability,
+            effects: Object.freeze({
+                mutatesArtifact: false,
+                launchesProcess: contract.name !== "inspect_native_dispatch_metadata",
+                mayShowUi: OWNED_PROCESS_OPERATIONS.has(contract.name),
+                mayAccessNetwork: OWNED_PROCESS_OPERATIONS.has(contract.name),
+                mayWriteFilesystem: OWNED_PROCESS_OPERATIONS.has(contract.name) ||
+                    contract.name === "observe_native_ui",
+                changesPermissions: false,
+                requiresRoot: false,
+            }),
+            limitations: Object.freeze([
+                "Availability and textual formats depend on the installed macOS/Xcode toolchain.",
+            ]),
+        });
+    }));
+};

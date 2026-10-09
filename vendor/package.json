@@ -1,0 +1,6 @@
+{
+  "name": "picode-rea-vendor",
+  "private": true,
+  "description": "REA (rea-agents) pinned for the picode-rea extension; node_modules is vendored and bound to the extension digest.",
+  "dependencies": { "rea-agents": "6.1.0" }
+}

@@ -1,0 +1,17 @@
+{
+  "id": "rea",
+  "name": "REA",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "publisher": "COGNIX[SE]",
+  "description": "Let your agents reverse engineer a shipped app or file with REA (morluto/rea, MIT, pinned 6.1.0): Electron/ASAR and JavaScript apps (routes, IPC), APKs, .NET assemblies, native binaries with Ghidra, archives and HAR captures. Static tools only: nothing runs the analysed target. REA is not a sandbox: its engines parse the file as you, so analyse only files you trust. Analysis results go to your agent's model provider.",
+  "agent": {
+    "mcpServers": {
+      "rea": {
+        "command": "node",
+        "args": ["${extensionDir}/server/rea-mcp.mjs"]
+      }
+    },
+    "skills": ["skills/rea"]
+  }
+}

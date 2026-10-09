@@ -1,0 +1,286 @@
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import { detectPackageSpecifier, register } from './SyncMcp.js'
+
+vi.mock('node:child_process', () => ({
+  execFile: vi.fn((_cmd: string, _args: string[], cb: Function) => {
+    cb(null, '│ ✓ Claude Code: ~/.claude.json │\n│ ✓ Cursor: ~/.cursor/mcp.json │\n', '')
+  }),
+}))
+
+let fakeHome: string | undefined
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>()
+  return {
+    ...actual,
+    homedir: () => fakeHome ?? actual.homedir(),
+  }
+})
+
+let tmp: string
+
+beforeEach(() => {
+  const savedArgv1 = process.argv[1]
+  tmp = join(tmpdir(), `clac-test-${Date.now()}`)
+  mkdirSync(join(tmp, 'node_modules', '.bin'), { recursive: true })
+  fakeHome = join(tmp, 'home')
+  mkdirSync(fakeHome, { recursive: true })
+  return () => {
+    process.argv[1] = savedArgv1!
+    fakeHome = undefined
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+function setupPkg(deps: Record<string, string>) {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ dependencies: deps }))
+  process.argv[1] = join(tmp, 'node_modules', '.bin', 'my-cli')
+}
+
+// --- detectPackageSpecifier tests ---
+
+test('returns bare name when argv[1] is undefined', () => {
+  process.argv[1] = undefined as any
+  expect(detectPackageSpecifier('my-cli')).toBe('my-cli')
+})
+
+test('returns bare name when no node_modules in path', () => {
+  process.argv[1] = '/usr/local/bin/my-cli'
+  expect(detectPackageSpecifier('my-cli')).toBe('my-cli')
+})
+
+test('returns bare name when package.json is missing', () => {
+  process.argv[1] = join(tmp, 'node_modules', '.bin', 'my-cli')
+  expect(detectPackageSpecifier('my-cli')).toBe('my-cli')
+})
+
+test('returns bare name when dep is not found', () => {
+  setupPkg({ other: '1.0.0' })
+  expect(detectPackageSpecifier('my-cli')).toBe('my-cli')
+})
+
+test('returns bare name when multiple deps exist', () => {
+  setupPkg({ 'my-cli': '1.0.0', other: '2.0.0' })
+  expect(detectPackageSpecifier('my-cli')).toBe('my-cli')
+})
+
+test('returns bare name for https dep', () => {
+  setupPkg({ 'my-cli': 'https://pkg.pr.new/my-cli@abc123' })
+  expect(detectPackageSpecifier('my-cli')).toBe('my-cli')
+})
+
+test('returns bare name for file: dep', () => {
+  setupPkg({ 'my-cli': 'file:../local-cli' })
+  expect(detectPackageSpecifier('my-cli')).toBe('my-cli')
+})
+
+test('never emits dependency specs containing whitespace or flags', () => {
+  setupPkg({ 'my-cli': '1.2.3 --inspect' })
+  expect(detectPackageSpecifier('my-cli')).toBe('my-cli')
+  expect(detectPackageSpecifier('my-cli', '@example/cli')).toBe('@example/cli')
+  expect(() => detectPackageSpecifier('my-cli', 'https://example.com/cli', '1.2.3')).toThrow()
+  expect(() => detectPackageSpecifier('my-cli', '@example/cli', '1.2.3 --inspect')).toThrow()
+})
+
+test('returns bare name for pinned version', () => {
+  setupPkg({ 'my-cli': '1.2.3' })
+  expect(detectPackageSpecifier('my-cli')).toBe('my-cli')
+})
+
+test('returns bare name for range specifier', () => {
+  setupPkg({ 'my-cli': '^1.0.0' })
+  expect(detectPackageSpecifier('my-cli')).toBe('my-cli')
+})
+
+test('returns bare name for tag specifier', () => {
+  setupPkg({ 'my-cli': 'latest' })
+  expect(detectPackageSpecifier('my-cli')).toBe('my-cli')
+})
+
+// --- register tests ---
+
+test('register calls add-mcp and writes amp config', async () => {
+  const result = await register('my-cli', { command: 'npx my-cli --mcp' })
+
+  expect(result.command).toBe('npx my-cli --mcp')
+  expect(result.agents).toContain('Claude Code')
+  expect(result.agents).toContain('Cursor')
+  expect(result.agents).toContain('Amp')
+
+  const configPath = join(fakeHome!, '.config', 'amp', 'settings.json')
+  expect(existsSync(configPath)).toBe(true)
+  const config = JSON.parse(readFileSync(configPath, 'utf-8'))
+  expect(config['amp.mcpServers']['my-cli']).toEqual({
+    command: 'npx',
+    args: ['my-cli', '--mcp'],
+  })
+})
+
+test('register with agents: ["amp"] skips add-mcp', async () => {
+  const { execFile } = await import('node:child_process')
+  vi.mocked(execFile).mockClear()
+
+  const result = await register('my-cli', {
+    command: 'npx my-cli --mcp',
+    agents: ['amp'],
+  })
+
+  expect(execFile).not.toHaveBeenCalled()
+  expect(result.agents).toEqual(['Amp'])
+})
+
+test('register handles quoted command paths with spaces', async () => {
+  const { execFile } = await import('node:child_process')
+  vi.mocked(execFile).mockClear()
+
+  const result = await register('my-cli', {
+    command: '"/path/to my/cli" --mcp',
+    agents: ['amp'],
+  })
+
+  expect(result.agents).toEqual(['Amp'])
+
+  const configPath = join(fakeHome!, '.config', 'amp', 'settings.json')
+  const config = JSON.parse(readFileSync(configPath, 'utf-8'))
+  expect(config['amp.mcpServers']['my-cli']).toEqual({
+    command: '/path/to my/cli',
+    args: ['--mcp'],
+  })
+})
+
+test('register uses bare name for global binary installs', async () => {
+  process.argv[1] = '/usr/local/bin/my-cli'
+
+  const { execFile } = await import('node:child_process')
+  vi.mocked(execFile).mockClear()
+
+  const result = await register('my-cli', {
+    agents: ['amp'],
+    package: '@example/cli',
+    version: '1.2.3',
+  })
+
+  expect(result.command).toBe('my-cli --mcp')
+
+  const configPath = join(fakeHome!, '.config', 'amp', 'settings.json')
+  const config = JSON.parse(readFileSync(configPath, 'utf-8'))
+  expect(config['amp.mcpServers']['my-cli']).toEqual({
+    command: 'my-cli',
+    args: ['--mcp'],
+  })
+})
+
+test('register uses runner for source entrypoints outside node_modules', async () => {
+  process.argv[1] = join(tmp, 'dist', 'bin.js')
+
+  const { execFile } = await import('node:child_process')
+  vi.mocked(execFile).mockClear()
+
+  const result = await register('my-cli', { agents: ['amp'] })
+
+  expect(result.command).toMatch(/^(npx|pnpx|bunx)\s/)
+  expect(result.command).toContain('my-cli --mcp')
+})
+
+test('register uses the detected runner with an explicit scoped package and version', async () => {
+  process.argv[1] = join(tmp, 'dist', 'bin.js')
+  vi.stubEnv('npm_config_user_agent', 'pnpm/10.0.0')
+  try {
+    const result = await register('my-cli', {
+      agents: ['amp'],
+      package: '@example/cli',
+      version: '1.2.3',
+    })
+
+    expect(result.command).toBe('pnpx @example/cli@1.2.3 --mcp')
+  } finally {
+    vi.unstubAllEnvs()
+  }
+})
+
+test('register uses runner for scoped dependency with different binary name', async () => {
+  setupPkg({ '@example/cli': '1.2.3' })
+  process.argv[1] = join(tmp, 'node_modules', '@example', 'cli', 'dist', 'bin.js')
+  vi.stubEnv('npm_config_user_agent', 'pnpm/10.0.0')
+  try {
+    const result = await register('my-cli', {
+      agents: ['amp'],
+      package: '@example/cli',
+      version: '1.2.3',
+    })
+
+    expect(result.command).toBe('pnpx @example/cli@1.2.3 --mcp')
+  } finally {
+    vi.unstubAllEnvs()
+  }
+})
+
+test('register derives the command from a different CLI name', async () => {
+  process.argv[1] = join(tmp, 'dist', 'bin.js')
+
+  const result = await register('example', { agents: ['amp'], cli: 'my-cli' })
+
+  expect(result.command).toMatch(/^(npx|pnpx|bunx)\s/)
+  expect(result.command).toContain('my-cli --mcp')
+
+  const configPath = join(fakeHome!, '.config', 'amp', 'settings.json')
+  const config = JSON.parse(readFileSync(configPath, 'utf-8'))
+  expect(config['amp.mcpServers']['example']).toEqual({
+    command: result.command.split(' ')[0],
+    args: ['my-cli', '--mcp'],
+  })
+})
+
+test('register uses bare name for global package entrypoints under node_modules', async () => {
+  process.argv[1] = join(tmp, 'global', 'node_modules', 'my-cli', 'dist', 'bin.js')
+
+  const { execFile } = await import('node:child_process')
+  vi.mocked(execFile).mockClear()
+
+  const result = await register('my-cli', { agents: ['amp'] })
+
+  expect(result.command).toBe('my-cli --mcp')
+})
+
+test('register uses runner for project dev dependency entrypoints under node_modules', async () => {
+  writeFileSync(
+    join(tmp, 'package.json'),
+    JSON.stringify({ devDependencies: { 'my-cli': '1.0.0' } }),
+  )
+  process.argv[1] = join(tmp, 'node_modules', 'my-cli', 'dist', 'bin.js')
+
+  const { execFile } = await import('node:child_process')
+  vi.mocked(execFile).mockClear()
+
+  const result = await register('my-cli', { agents: ['amp'] })
+
+  expect(result.command).toMatch(/^(npx|pnpx|bunx)\s/)
+  expect(result.command).toContain('my-cli --mcp')
+})
+
+test('register uses runner for node_modules installs', async () => {
+  process.argv[1] = join(tmp, 'node_modules', '.bin', 'my-cli')
+
+  const { execFile } = await import('node:child_process')
+  vi.mocked(execFile).mockClear()
+
+  const result = await register('my-cli', { agents: ['amp'] })
+
+  // Should include a runner prefix (npx, pnpx, or bunx)
+  expect(result.command).toMatch(/^(npx|pnpx|bunx)\s/)
+  expect(result.command).toContain('--mcp')
+})
+
+test('register writes amp config to existing settings', async () => {
+  const configDir = join(fakeHome!, '.config', 'amp')
+  mkdirSync(configDir, { recursive: true })
+  writeFileSync(join(configDir, 'settings.json'), JSON.stringify({ 'amp.theme': 'dark' }))
+
+  await register('my-cli', { command: 'npx my-cli --mcp', agents: ['amp'] })
+
+  const config = JSON.parse(readFileSync(join(configDir, 'settings.json'), 'utf-8'))
+  expect(config['amp.theme']).toBe('dark')
+  expect(config['amp.mcpServers']['my-cli']).toBeDefined()
+})

@@ -1,0 +1,36 @@
+import { constants, createReadStream } from "node:fs";
+import { chmod, copyFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { join } from "node:path";
+import { AnalysisInputError, AnalysisCapabilityUnavailableError, } from "../domain/analysisErrorCore.js";
+/** Stream a local file digest without retaining the APK or JAR in memory. */
+export const hashAndroidFile = async (path) => {
+    const hash = createHash("sha256");
+    for await (const chunk of createReadStream(path))
+        hash.update(chunk);
+    return hash.digest("hex");
+};
+/** Bind decompiler input to the admitted artifact, even if the original changes. */
+export const snapshotAndroidTarget = async (path, sha256, root, operation) => {
+    const snapshot = join(root, "target.apk");
+    await copyFile(path, snapshot, constants.COPYFILE_EXCL);
+    await chmod(snapshot, 0o400);
+    if ((await hashAndroidFile(snapshot)) !== sha256)
+        throw new AnalysisInputError(operation, undefined, [
+            {
+                path: ["path"],
+                reason: "invalid_value",
+                message: "APK bytes changed after admission; retry against a stable file.",
+            },
+        ]);
+    return snapshot;
+};
+/** Fingerprint the actual immutable engine bytes executed for this observation. */
+export const snapshotAndroidEngine = async (source, sha256, root, operation) => {
+    const path = join(root, "engine.jar");
+    await copyFile(source, path, constants.COPYFILE_EXCL);
+    await chmod(path, 0o400);
+    if ((await hashAndroidFile(path)) !== sha256)
+        throw new AnalysisCapabilityUnavailableError("jadx", operation, "REA_JADX_MCP_JAR bytes changed during admission; retry with a stable engine file.");
+    return { path, sha256 };
+};

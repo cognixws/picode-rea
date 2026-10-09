@@ -1,0 +1,24 @@
+import { optionalProviderUnavailable, } from "../application/OptionalObservationProviders.js";
+import { err } from "../domain/result.js";
+import { captureBrowserScenario } from "../application/BrowserScenarioCaptureService.js";
+import { toolContract } from "../contracts/toolContracts.js";
+import { browserScenarioSchema } from "../domain/browserScenario.js";
+import { logToolExecution } from "./toolLogging.js";
+import { toolRegistrationOptions } from "./toolRegistrationOptions.js";
+import { toCallToolResult, toEvidenceToolResult } from "./toolResult.js";
+/** Register the browser scenario tool with execution-time provider diagnostics. */
+export const registerBrowserScenarioTool = (server, options) => {
+    const contract = toolContract("capture_browser_scenario");
+    server.registerTool(contract.name, toolRegistrationOptions(contract), async (input, context) => {
+        const scenario = browserScenarioSchema.parse(input);
+        if (options.loadFailure !== undefined)
+            return toCallToolResult(err(optionalProviderUnavailable(options.loadFailure, contract.name)), contract);
+        const result = await logToolExecution(options.logger, contract.name, () => captureBrowserScenario(options.provider, scenario, {
+            signal: context.mcpReq.signal,
+        }));
+        if (!result.ok)
+            return toCallToolResult(result, contract);
+        const recorded = options.recordEvidence?.(result.value);
+        return toEvidenceToolResult(result.value, contract, recorded);
+    });
+};

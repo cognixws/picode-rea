@@ -1,0 +1,233 @@
+import { z } from "zod";
+import { WEB_SOURCE_MAP_LIMITS } from "../../domain/webSourceLocation.js";
+import { hasValidSourceMapContents } from "../../domain/sourceMapContents.js";
+const leafSchema = z.object({
+    version: z.literal(3),
+    file: z.string().nullable().optional(),
+    sourceRoot: z.string().nullable().optional(),
+    sources: z.array(z.string().nullable()),
+    sourcesContent: z.array(z.string().nullable()).nullable().optional(),
+    names: z.array(z.string()).default([]),
+    mappings: z.string().regex(/^[A-Za-z0-9+/,;]*$/u),
+    ignoreList: z.array(z.number().int().min(0)).optional(),
+    x_google_ignoreList: z.array(z.number().int().min(0)).optional(),
+});
+const mapHeaderSchema = z.object({
+    version: z.literal(3),
+    file: z.string().nullable().optional(),
+    sections: z.unknown().optional(),
+});
+const sectionSchema = z.object({
+    offset: z.object({
+        line: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+        column: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    }),
+    map: z.unknown().optional(),
+    url: z.string().optional(),
+});
+const indexedSchema = z.object({
+    version: z.literal(3),
+    sections: z.array(sectionSchema),
+});
+/** A decoder-profile failure with an actionable producer constraint. */
+export class SourceMapFormatFailure extends Error {
+    reason;
+    constructor(reason, message) {
+        super(message);
+        this.reason = reason;
+    }
+}
+const compare = (a, b) => a.line - b.line || a.column - b.column;
+const addOffset = (base, offset) => {
+    const result = {
+        line: base.line + offset.line,
+        column: offset.column + (offset.line === 0 ? base.column : 0),
+    };
+    if (!Number.isSafeInteger(result.line) ||
+        !Number.isSafeInteger(result.column) ||
+        result.line >= WEB_SOURCE_MAP_LIMITS.decodedRows)
+        throw new SourceMapFormatFailure("limit", "Indexed offset exceeds the 262144 generated-row decoder budget.");
+    return result;
+};
+const consumeRecords = (budget, count) => {
+    if (count > WEB_SOURCE_MAP_LIMITS.decodedRecords - budget.records)
+        throw new SourceMapFormatFailure("limit", `Source-map structure exceeds the ${WEB_SOURCE_MAP_LIMITS.decodedRecords}-record decoder budget.`);
+    budget.records += count;
+};
+const addSections = (node, pending, budget, options) => {
+    options.check?.();
+    const header = mapHeaderSchema.parse(node.value);
+    if (!Array.isArray(header.sections))
+        throw new SourceMapFormatFailure("format", "Indexed source-map sections must be an array.");
+    consumeRecords(budget, header.sections.length);
+    const sections = indexedSchema.parse(node.value).sections;
+    for (const [index, section] of sections.entries()) {
+        if ((index & 255) === 0)
+            options.check?.();
+        const previous = sections[index - 1];
+        if (previous !== undefined && compare(section.offset, previous.offset) <= 0)
+            throw new SourceMapFormatFailure("format", "Indexed section offsets must be strictly increasing.");
+        if (section.url !== undefined)
+            throw new SourceMapFormatFailure("unsupported", `External source-map section URL is not fetched: ${section.url}`);
+        if (section.map === undefined)
+            throw new SourceMapFormatFailure("format", "Indexed section requires an embedded map.");
+    }
+    for (let index = sections.length - 1; index >= 0; index -= 1) {
+        const section = sections[index];
+        if (section === undefined)
+            continue;
+        const next = sections[index + 1];
+        const nextOffset = next === undefined ? null : addOffset(node.offset, next.offset);
+        const stop = nextOffset === null
+            ? node.stop
+            : node.stop === null || compare(nextOffset, node.stop) < 0
+                ? nextOffset
+                : node.stop;
+        const offset = addOffset(node.offset, section.offset);
+        if (node.stop !== null && compare(offset, node.stop) >= 0)
+            throw new SourceMapFormatFailure("format", "Nested source-map section overlaps its enclosing boundary.");
+        pending.push({
+            value: section.map,
+            path: [...node.path, index],
+            offset,
+            stop,
+        });
+    }
+};
+const inspectMappingLayout = (mappings, check) => {
+    let lines = 1;
+    let segments = 0;
+    let components = 0;
+    let inSegment = false;
+    let continued = false;
+    let digits = 0;
+    const finish = () => {
+        if (continued)
+            throw new SourceMapFormatFailure("format", "Source-map VLQ ends with an unfinished continuation.");
+        if (inSegment && ![1, 4, 5].includes(components))
+            throw new SourceMapFormatFailure("format", "Source-map segment requires one, four or five VLQ components.");
+    };
+    let index = 0;
+    for (const character of mappings) {
+        if ((index++ & 0x3fff) === 0)
+            check?.();
+        if (character === "," || character === ";") {
+            finish();
+            inSegment = false;
+            components = 0;
+            if (character === ";")
+                lines += 1;
+        }
+        else {
+            digits += 1;
+            if ((digits === 7 && !/[A-Dg-j]/u.test(character)) ||
+                (digits > 7 && character !== "A" && character !== "g"))
+                throw new SourceMapFormatFailure("format", "Source-map VLQ exceeds the format's 32-bit quantity representation.");
+            if (!inSegment)
+                segments += 1;
+            inSegment = true;
+            continued = /[g-z0-9+/]/u.test(character);
+            if (!continued) {
+                components += 1;
+                digits = 0;
+            }
+        }
+        if (segments > WEB_SOURCE_MAP_LIMITS.decodedSegments ||
+            lines > WEB_SOURCE_MAP_LIMITS.decodedRows)
+            throw new SourceMapFormatFailure("limit", "Source-map layout exceeds the 262144 segment/generated-row decoder budget.");
+    }
+    finish();
+    return { lines, segments };
+};
+const inspectLeaf = (node, budget, options) => {
+    options.check?.();
+    consumeRecords(budget, 1);
+    if (typeof node.value !== "object" ||
+        node.value === null ||
+        Array.isArray(node.value))
+        return leafSchema.parse(node.value);
+    const rawMap = node.value;
+    const rawSources = rawMap.sources;
+    const rawNames = rawMap.names;
+    const rawContents = rawMap.sourcesContent;
+    consumeRecords(budget, Array.isArray(rawSources) ? rawSources.length : 0);
+    consumeRecords(budget, Array.isArray(rawNames) ? rawNames.length : 0);
+    consumeRecords(budget, Array.isArray(rawContents) ? rawContents.length : 0);
+    options.check?.();
+    if (options.profile === "browser-collection" && !Array.isArray(rawNames))
+        throw new SourceMapFormatFailure("format", "Source-map leaf requires a names array.");
+    if (options.profile === "browser-collection" &&
+        !hasValidSourceMapContents(Array.isArray(rawSources) ? rawSources.length : 0, rawContents))
+        throw new SourceMapFormatFailure("format", "Source-map sourcesContent must align with its source declarations.");
+    options.check?.();
+    const leaf = leafSchema.parse(node.value);
+    const layout = inspectMappingLayout(leaf.mappings, options.check);
+    consumeRecords(budget, layout.segments + layout.lines);
+    if (layout.segments > WEB_SOURCE_MAP_LIMITS.decodedSegments ||
+        node.offset.line + layout.lines > WEB_SOURCE_MAP_LIMITS.decodedRows)
+        throw new SourceMapFormatFailure("limit", "Source-map layout exceeds the 262144 segment/generated-row decoder budget.");
+    return leaf;
+};
+/** Validate structure before allocation, retaining raw declarations and section boundaries. */
+export const inspectSourceMap = (text) => {
+    const withoutBom = text.replace(/^\uFEFF/u, "");
+    const jsonText = withoutBom.startsWith(")]}'")
+        ? withoutBom.slice(withoutBom.indexOf("\n") + 1)
+        : withoutBom;
+    const value = JSON.parse(jsonText);
+    const inspected = inspectSourceMapValue(value);
+    const normalized = inspected.format === "regular"
+        ? inspected.leaves[0]?.map
+        : {
+            version: 3,
+            sections: inspected.leaves.map((leaf) => ({
+                offset: leaf.offset,
+                map: leaf.map,
+            })),
+        };
+    return {
+        jsonText: JSON.stringify(normalized),
+        ...inspected,
+    };
+};
+/** Return validated leaves when a consumer needs decoded rows after preflight. */
+export const inspectSourceMapValue = (value, options = {}) => {
+    options.check?.();
+    const root = mapHeaderSchema.parse(value);
+    const declarations = [];
+    const leaves = [];
+    const pending = [
+        { value, path: [], offset: { line: 0, column: 0 }, stop: null },
+    ];
+    const budget = options.budget ?? { records: 0 };
+    while (pending.length > 0) {
+        options.check?.();
+        const node = pending.pop();
+        if (node === undefined)
+            break;
+        if (node.path.length > WEB_SOURCE_MAP_LIMITS.sectionDepth)
+            throw new SourceMapFormatFailure("limit", "Indexed source-map nesting exceeds the 64-level decoder stack budget.");
+        if (mapHeaderSchema.parse(node.value).sections !== undefined) {
+            addSections(node, pending, budget, options);
+            continue;
+        }
+        const leaf = inspectLeaf(node, budget, options);
+        leaves.push({ map: leaf, offset: node.offset, stop: node.stop });
+        if (options.profile !== "browser-collection")
+            for (const [sourceIndex, source] of leaf.sources.entries())
+                declarations.push({
+                    sectionPath: node.path,
+                    sourceIndex,
+                    source,
+                    root: leaf.sourceRoot ?? null,
+                    content: leaf.sourcesContent?.[sourceIndex] ?? null,
+                    ignored: (leaf.ignoreList ?? leaf.x_google_ignoreList ?? []).includes(sourceIndex),
+                });
+    }
+    return {
+        format: root.sections === undefined ? "regular" : "indexed",
+        reportedFile: root.file ?? null,
+        declarations,
+        leaves,
+    };
+};

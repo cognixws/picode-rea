@@ -1,0 +1,184 @@
+import * as t from "@babel/types";
+import { semanticBuiltinNamespacePath } from "./javascriptSemanticProvenance.js";
+import { semanticCallableIdForNode } from "./javascriptSemanticProjection.js";
+import { resolveSemanticBindingState, semanticResolutionBlocked, } from "./javascriptSemanticState.js";
+import { traverseJavaScriptAst } from "./javascriptSemanticTraversal.js";
+import { readExactJavaScriptLiteral, semanticStaticPropertyKey, semanticStaticPropertyName, } from "./javascriptAstValues.js";
+/** Resolve bindings written by the nearest variable or assignment owner. */
+export const assignedSemanticResultBindings = (node, ancestors, state) => {
+    for (let index = ancestors.length - 1; index >= 0; index -= 1) {
+        const owner = ancestors[index];
+        if (owner === undefined)
+            continue;
+        let pattern;
+        let source = null;
+        if (t.isVariableDeclarator(owner)) {
+            pattern = owner.id;
+            source = owner.init ?? null;
+        }
+        else if (t.isAssignmentExpression(owner)) {
+            pattern = owner.left;
+            source = owner.right;
+        }
+        if (pattern !== undefined &&
+            source !== null &&
+            assignedSourceIs(node, source))
+            return projectedPatternBindings(pattern, state);
+        if (semanticCallableIdForNode(owner) !== null)
+            return [];
+    }
+    return [];
+};
+const assignedSourceIs = (node, source) => {
+    let value = source;
+    while (true) {
+        if (t.isAwaitExpression(value))
+            value = value.argument;
+        else if (t.isParenthesizedExpression(value) ||
+            t.isTSAsExpression(value) ||
+            t.isTSTypeAssertion(value) ||
+            t.isTypeCastExpression(value) ||
+            t.isTSSatisfiesExpression(value))
+            value = value.expression;
+        else
+            break;
+    }
+    return value === node;
+};
+const projectedPatternBindings = (pattern, state) => {
+    const output = [];
+    const visit = (current, path, partial) => {
+        if (t.isIdentifier(current)) {
+            const binding = resolveSemanticBindingState(state, current, current.name);
+            if (binding !== undefined)
+                output.push({
+                    bindingId: binding.bindingId,
+                    identifier: current,
+                    projectionPath: path,
+                    resolution: partial ? "partial" : "complete",
+                });
+            return;
+        }
+        if (t.isAssignmentPattern(current))
+            return visit(current.left, path, true);
+        if (t.isRestElement(current))
+            return visit(current.argument, [...path, null], true);
+        if (t.isObjectPattern(current)) {
+            for (const property of current.properties) {
+                if (t.isRestElement(property))
+                    visit(property.argument, [...path, null], true);
+                else
+                    visit(property.value, [
+                        ...path,
+                        semanticStaticPropertyKey(property.key, property.computed),
+                    ], partial ||
+                        semanticStaticPropertyKey(property.key, property.computed) ===
+                            null);
+            }
+        }
+        else if (t.isArrayPattern(current)) {
+            current.elements.forEach((element, index) => {
+                if (element !== null)
+                    visit(element, [...path, index], partial);
+            });
+        }
+    };
+    visit(pattern, [], false);
+    return output;
+};
+export const semanticProjectedBindingFacts = (bindings) => bindings.map(({ identifier: _identifier, ...fact }) => fact);
+/** Return a scalar owner only for an unprojected identifier result. */
+export const scalarAssignedResultBinding = (bindings) => bindings.length === 1 && bindings[0]?.projectionPath.length === 0
+    ? (bindings[0]?.bindingId ?? null)
+    : null;
+/** Resolve a direct or namespace-imported built-in method. */
+export const builtinDataEffectMethod = (callee, state, specifiers) => {
+    if (t.isIdentifier(callee)) {
+        const binding = resolveSemanticBindingState(state, callee, callee.name);
+        return moduleMethod(binding, specifiers);
+    }
+    if (!t.isMemberExpression(callee) && !t.isOptionalMemberExpression(callee))
+        return null;
+    if (!t.isIdentifier(callee.object))
+        return null;
+    const binding = resolveSemanticBindingState(state, callee.object, callee.object.name);
+    const namespace = binding?.directOrigins.some(({ specifier, importedPath }) => specifiers.includes(specifier) &&
+        semanticBuiltinNamespacePath(importedPath));
+    return namespace
+        ? semanticStaticPropertyName(callee.property, callee.computed)
+        : null;
+};
+const moduleMethod = (binding, specifiers) => {
+    for (const { specifier, importedPath } of binding?.directOrigins ?? []) {
+        if (!specifiers.includes(specifier))
+            continue;
+        return importedPath.at(-1) ?? null;
+    }
+    return null;
+};
+/** Recognize global or node:process aliases without accepting shadowing. */
+export const isSemanticProcessObject = (node, state) => {
+    if (!t.isIdentifier(node))
+        return false;
+    const binding = resolveSemanticBindingState(state, node, node.name);
+    if (binding === undefined)
+        return (node.name === "process" &&
+            !semanticResolutionBlocked(state, node, node.name));
+    return binding.directOrigins.some(({ specifier }) => specifier === "process" || specifier === "node:process");
+};
+/** Resolve the nearest direct variable/assignment owner before a callable. */
+export const outerDataEffectBinding = (node, context) => {
+    return scalarAssignedResultBinding(assignedSemanticResultBindings(node, context.ancestors, context.state));
+};
+/** Traverse with exact callable and ancestor stacks. */
+export const traverseDataEffects = (program, context, visit) => {
+    context.callableStack.length = 0;
+    context.ancestors.length = 0;
+    traverseJavaScriptAst(program, {
+        enter: (node, parent) => {
+            const callableId = semanticCallableIdForNode(node);
+            if (callableId !== null && context.callableIds.has(callableId))
+                context.callableStack.push(callableId);
+            visit(node, parent);
+            context.ancestors.push(node);
+        },
+        exit: (node) => {
+            context.ancestors.pop();
+            const callableId = semanticCallableIdForNode(node);
+            if (callableId !== null && context.callableStack.at(-1) === callableId)
+                context.callableStack.pop();
+        },
+    });
+};
+/** Resolve one direct identifier argument to a lexical binding. */
+export const dataEffectArgumentBindingId = (node, state) => t.isIdentifier(node)
+    ? (resolveSemanticBindingState(state, node, node.name)?.bindingId ?? null)
+    : null;
+/** Read one JSON primitive default without evaluating code. */
+export const dataEffectPrimitive = (node) => {
+    if (t.isStringLiteral(node) || t.isNumericLiteral(node))
+        return node.value;
+    if (t.isBooleanLiteral(node))
+        return node.value;
+    return null;
+};
+/** Read one static string or expression-free template. */
+export const dataEffectLiteralString = (node) => {
+    if (node === undefined)
+        return null;
+    const literal = readExactJavaScriptLiteral(node);
+    if (literal.found && typeof literal.value === "string")
+        return literal.value;
+    return t.isTemplateLiteral(node) && node.expressions.length === 0
+        ? (node.quasis[0]?.value.raw ?? null)
+        : null;
+};
+/** Read a member callee from call or construction syntax. */
+export const dataEffectMemberCallee = (node) => t.isMemberExpression(node.callee) || t.isOptionalMemberExpression(node.callee)
+    ? node.callee
+    : null;
+/** Read a parent member's object when present. */
+export const dataEffectMemberObject = (node) => node !== null &&
+    (t.isMemberExpression(node) || t.isOptionalMemberExpression(node))
+    ? node.object
+    : null;
